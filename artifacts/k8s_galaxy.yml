@@ -4,21 +4,10 @@
   connection: local
   vars:
     NAMESPACE: galaxy
-    AFFINITY:
-      affinity:
-        podAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              podAffinityTerm:
-                topologyKey: "kubernetes.io/hostname"
-                labelSelector:
-                  matchExpressions:
-                    - key: app.kubernetes.io/instance
-                      operator: In
-                      values:
-                        - galaxy
-                        - postgres-operator
-                        - rabbitmq-operator
+    PULSAR_URL: "{{ pulsar_ngrok_url }}"
+    
+    PULSAR_PATCH_URL: "https://raw.githubusercontent.com/jbernalr-iacs/tosca/main/files/pulsar.py"
+    
     admin_users: "{{ galaxy_admin_users | default('admin@galaxy.com') }}"
     brand: "{{ galaxy_brand | default('IM Deployed Galaxy K8s Cluster') }}"
     max_mem: "{{ galaxy_max_mem | default(0) }}"
@@ -35,18 +24,15 @@
 
     - when: deployed.rc == 1
       block:
-
         - name: Create postgres-operator helm chart values file
           copy:
             dest: /opt/postgres_values.yaml
             mode: '644'
-            content: "{{ AFFINITY | to_yaml }}"
-
+            content: "{}"
         - name: Add helm repo cloudnative-pg
           command: helm repo add cloudnative-pg https://cloudnative-pg.github.io/charts/
           environment:
             KUBECONFIG: /etc/kubernetes/admin.conf
-
         - name: Deploy postgres-operator
           command: helm install -n {{ NAMESPACE }} --create-namespace postgres-operator cloudnative-pg/cloudnative-pg --version 0.23.2 -f /opt/postgres_values.yaml --wait
           environment:
@@ -62,7 +48,6 @@
 
     - when: deployed.rc == 1
       block:
-
         - name: Create rabbitmq-operator helm chart values file
           copy:
             dest: /opt/rabbitmq_values.yaml
@@ -76,58 +61,15 @@
               clusterOperator:
                 image:
                   repository: bitnamilegacy/rabbitmq-cluster-operator
-                {{ AFFINITY | to_yaml(indent=4) }}
               msgTopologyOperator:
                 image:
                   repository: bitnamilegacy/rmq-messaging-topology-operator
-                {{ AFFINITY | to_yaml(indent=4) }}
-
         - name: Add helm repo bitnami
           command: helm repo add bitnami https://charts.bitnami.com/bitnami
           environment:
             KUBECONFIG: /etc/kubernetes/admin.conf
-
         - name: Deploy rabbitmq-operator
           command: helm install -n {{ NAMESPACE }} --create-namespace rabbitmq-operator bitnami/rabbitmq-cluster-operator --version  2.6.12 -f /opt/rabbitmq_values.yaml  --wait
-          environment:
-            KUBECONFIG: /etc/kubernetes/admin.conf
-
-    - name: "Check if galaxy-cvmfs is already deployed"
-      command: helm status galaxy-cvmfs -n {{ NAMESPACE }}
-      register: deployed
-      failed_when: deployed.rc != 0 and deployed.rc != 1
-      changed_when: false
-      environment:
-        KUBECONFIG: /etc/kubernetes/admin.conf
-
-    - when: deployed.rc == 1
-      block:
-
-        - name: Create galaxy helm chart values file
-          copy:
-            dest: /opt/galaxy-cvmfs-csi_values.yaml
-            mode: '644'
-            content: |
-              storageClassName: galaxy-cvmfs
-              cvmfscsi:
-                cache:
-                  alien:
-                    pvc:
-                      storageClass: managed-nfs-storage
-                      name: cvmfs-alien-cache
-                # try to pack all the pods in the same nodes
-                controllerplugin:
-                  {{ AFFINITY | to_yaml(indent=4) }}
-                nodeplugin:
-                  {{ AFFINITY | to_yaml(indent=4) }}
-
-        - name: Add helm repo galaxy
-          command: helm repo add galaxy https://raw.githubusercontent.com/CloudVE/helm-charts/master/
-          environment:
-            KUBECONFIG: /etc/kubernetes/admin.conf
-
-        - name: Deploy Galaxy CVMFS CSI
-          command: helm install --create-namespace -n {{ NAMESPACE }} galaxy-cvmfs galaxy/galaxy-cvmfs-csi --wait -f  /opt/galaxy-cvmfs-csi_values.yaml --version 2.2.0  --wait
           environment:
             KUBECONFIG: /etc/kubernetes/admin.conf
 
@@ -141,6 +83,25 @@
 
     - when: deployed.rc == 1
       block:
+        - name: Create Galaxy Namespace
+          command: kubectl create namespace {{ NAMESPACE }}
+          ignore_errors: yes
+          environment:
+            KUBECONFIG: /etc/kubernetes/admin.conf
+
+        - name: Download Pulsar Patch from Custom Repo
+          get_url:
+            url: "{{ PULSAR_PATCH_URL }}"
+            dest: /tmp/pulsar.py
+            force: yes
+
+        - name: Create Pulsar Patch ConfigMap
+          shell: |
+            kubectl create configmap galaxy-pulsar-patch \
+            --from-file=pulsar.py=/tmp/pulsar.py \
+            -n {{ NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+          environment:
+            KUBECONFIG: /etc/kubernetes/admin.conf
 
         - name: Remove GiB from max_mem
           set_fact:
@@ -158,15 +119,71 @@
                 deploy: false
               cvmfs:
                 deploy: false
+              refdata:
+                enabled: false
               postgresql:
                 deploy: false
               rabbitmq:
                 deploy: false
+              
               configs:
                 galaxy.yml:
                   galaxy:
-                    admin_users: {{ admin_users }}
-                    brand: {{ brand }}
+                    admin_users: "{{ admin_users }}"
+                    brand: "{{ brand }}"
+                
+                job_conf.yml:
+                  execution:
+                    default: tpv_dispatcher
+                    environments:
+                      tpv_dispatcher:
+                        container_monitor: false
+                        docker_default_container_id: 'quay.io/galaxyproject/galaxy-min:24.2-uid'
+                        function: map_tool_to_destination
+                        rules_module: tpv.rules
+                        runner: dynamic
+                        tpv_config_files:
+                          - https://gxy.io/tpv/db.yml
+                          - https://gist.githubusercontent.com/jbernalr-iacs/3422135f7fdb118047ad223bda5c3263/raw/a5ddbaa1e35a12bf51030d492ade975286f4af03/tpv_rules.yml
+                        type: python
+                  handling:
+                    assign:
+                      - db-skip-locked
+                  destinations:
+                    pulsar_eosc_node:
+                      runner: pulsar_http
+                      params:
+                        url: "{{ PULSAR_URL }}"
+                        default_file_action: remote_transfer
+                        transport: curl
+                        rewrite_parameters: true
+                        dependency_resolution: remote
+                        jobs_directory: /home/centos/pulsar/files/staging
+                        persistence_directory: /home/centos/pulsar/files/persisted
+                  runners:
+                    k8s:
+                      k8s_cleanup_job: onsuccess
+                      k8s_data_volume_claim: 'galaxy-galaxy-pvc:/galaxy/server/database'
+                      load: galaxy.jobs.runners.kubernetes:KubernetesJobRunner
+                      k8s_use_service_account: true
+                    local:
+                      load: galaxy.jobs.runners.local:LocalJobRunner
+                      workers: 4
+                    pulsar_http:
+                      load: galaxy.jobs.runners.pulsar:PulsarJobRunner
+                      workers: 1
+                      transport: curl
+
+              extraVolumeMounts:
+                - name: pulsar-patch-volume
+                  mountPath: /galaxy/server/lib/galaxy/jobs/runners/pulsar.py
+                  subPath: pulsar.py
+              
+              extraVolumes:
+                - name: pulsar-patch-volume
+                  configMap:
+                    name: galaxy-pulsar-patch
+
               jobs:
                 rules:
                   tpv_rules_local.yml:
@@ -175,14 +192,12 @@
                         runner: k8s
                         {{ 'max_cores: ' ~ (max_cores | int - 1) if max_cores | int > 0 else '# no max_cores' }}
                         {{ 'max_mem: ' ~ max_mem if max_mem | int > 0 else '# no max_mem' }}
-              # to fix https://github.com/galaxyproject/galaxy-helm/issues/513
+              
               tusd:
                 ingress:
                   annotations:
                     nginx.ingress.kubernetes.io/connection-proxy-header: "keep-alive"
                     nginx.ingress.kubernetes.io/enable-websockets: "true"
-              # try to pack all the pods in the same nodes
-              {{ AFFINITY | to_yaml }}
 
         - name: Add helm repo galaxy
           command: helm repo add galaxy https://raw.githubusercontent.com/CloudVE/helm-charts/master/
