@@ -12,6 +12,7 @@
     brand: "{{ galaxy_brand | default('IM Deployed Galaxy K8s Cluster') }}"
     max_mem: "{{ galaxy_max_mem | default(0) }}"
     max_cores: "{{ galaxy_max_cores | default(0) }}"
+    galaxy_infra_url: "{{ galaxy_url | default('http://' ~ ansible_default_ipv4.address ~ '/galaxy') }}"
   tasks:
 
     - name: "Check if postgres-operator is already deployed"
@@ -131,6 +132,8 @@
                   galaxy:
                     admin_users: "{{ admin_users }}"
                     brand: "{{ brand }}"
+                    galaxy_infrastructure_url: "{{ galaxy_infra_url }}"
+                    sanitize_all_html: false
                 
                 job_conf.yml:
                   execution:
@@ -144,22 +147,23 @@
                         runner: dynamic
                         tpv_config_files:
                           - https://gxy.io/tpv/db.yml
-                          - https://gist.githubusercontent.com/jbernalr-iacs/3422135f7fdb118047ad223bda5c3263/raw/a5ddbaa1e35a12bf51030d492ade975286f4af03/tpv_rules.yml
+                          - /galaxy/server/database/rules/tpv_rules_local.yml
                         type: python
                   handling:
                     assign:
                       - db-skip-locked
                   destinations:
                     pulsar_eosc_node:
-                      runner: pulsar_http
+                      runner: pulsar_rest
                       params:
+                        app: _default_
                         url: "{{ PULSAR_URL }}"
-                        default_file_action: remote_transfer
-                        transport: curl
+                        private_token: eucanscreen2026
+                        # APUNTADO al mapa de acciones en el disco persistente
+                        file_action_config: /galaxy/server/database/rules/pulsar_actions.yml
                         rewrite_parameters: true
                         dependency_resolution: remote
-                        jobs_directory: /home/centos/pulsar/files/staging
-                        persistence_directory: /home/centos/pulsar/files/persisted
+                        submit_native_python_path: true
                   runners:
                     k8s:
                       k8s_cleanup_job: onsuccess
@@ -169,10 +173,8 @@
                     local:
                       load: galaxy.jobs.runners.local:LocalJobRunner
                       workers: 4
-                    pulsar_http:
+                    pulsar_rest:
                       load: galaxy.jobs.runners.pulsar:PulsarJobRunner
-                      workers: 1
-                      transport: curl
 
               extraVolumeMounts:
                 - name: pulsar-patch-volume
@@ -209,6 +211,35 @@
           environment:
             KUBECONFIG: /etc/kubernetes/admin.conf
 
+        - name: Create HTTPRoute manifest file for Galaxy
+          copy:
+            dest: /opt/galaxy_http_route.yaml
+            mode: '644'
+            content: |
+              apiVersion: gateway.networking.k8s.io/v1
+              kind: HTTPRoute
+              metadata:
+                name: galaxy-main-route
+                namespace: {{ NAMESPACE }}
+              spec:
+                parentRefs:
+                - name: nginx-gateway
+                  namespace: nginx-gateway
+                  sectionName: http
+                rules:
+                - matches:
+                  - path:
+                      type: PathPrefix
+                      value: /
+                  backendRefs:
+                  - name: galaxy-nginx
+                    port: 8000
+
+        - name: Apply HTTPRoute to open Nginx Gateway
+          command: kubectl apply -f /opt/galaxy_http_route.yaml
+          environment:
+            KUBECONFIG: /etc/kubernetes/admin.conf
+
         - name: Wait Galaxy Web to be available
           command: kubectl -n {{ NAMESPACE }} wait --for=condition=Available deployment/galaxy-web --timeout=600s
           environment:
@@ -224,3 +255,100 @@
           until: error_pods.stdout_lines | length < 1
           environment:
             KUBECONFIG: /etc/kubernetes/admin.conf
+
+        - name: Generate local Pulsar Actions file
+          copy:
+            dest: /tmp/pulsar_actions.yml
+            mode: '644'
+            content: |
+              default_action: transfer
+              paths:
+                - action: transfer
+                  type: jobdir
+                - action: transfer
+                  prefix: /galaxy/server/database
+
+        - name: Generate local TPV Rules file (Injecting Ngrok URL)
+          copy:
+            dest: /tmp/tpv_rules_local.yml
+            mode: '644'
+            content: |
+              global:
+                default_inherits: default
+              destinations:
+                pulsar_eosc_node:
+                  runner: pulsar_rest
+                  params:
+                    file_action_config: /galaxy/server/database/rules/pulsar_actions.yml
+                    rewrite_parameters: 'true'
+                    dependency_resolution: remote
+                    # [MAGIA IAC] Aquí Ansible inyecta la variable automáticamente
+                    url: {{ PULSAR_URL }}
+                    private_token: eucanscreen2026
+                  scheduling:
+                    require: [pulsar_ngrok_tunnel]
+                k8s:
+                  runner: k8s
+                  max_cores: 1
+                  params:
+                    docker_enabled: 'true'
+                  scheduling:
+                    accept: [docker]
+              tools:
+                upload1:
+                  execute: k8s
+                __DATA_FETCH__:
+                  execute: k8s
+                default:
+                  params:
+                    container_monitor: false
+                    docker_default_container_id: quay.io/galaxyproject/galaxy-min:24.2-uid
+                    tmp_dir: 'true'
+                  scheduling:
+                    reject: [offline]
+                '.*ecs_fetch_aspire.*':
+                  scheduling:
+                    require: [pulsar_ngrok_tunnel]
+                '.*ecs_enrich_v2.*':
+                  scheduling:
+                    require: [pulsar_ngrok_tunnel]
+                '.*ecs_qc.*':
+                  scheduling:
+                    require: [pulsar_ngrok_tunnel]
+                '.*ecs_merge.*':
+                  execute: k8s
+                '.*ecs_dashboard.*':
+                  execute: k8s
+
+        - name: Get active galaxy-job-0 pod name
+          shell: "kubectl get pods -n {{ NAMESPACE }} | grep '^galaxy-job-0' | grep 'Running' | awk '{print $1}' | head -n 1"
+          register: job_pod_name
+          retries: 10
+          delay: 15
+          until: job_pod_name.stdout != ""
+          environment:
+            KUBECONFIG: /etc/kubernetes/admin.conf
+
+        - name: Create rules directory in Galaxy Persistent Volume
+          command: kubectl exec {{ job_pod_name.stdout }} -n {{ NAMESPACE }} -- mkdir -p /galaxy/server/database/rules
+          environment:
+            KUBECONFIG: /etc/kubernetes/admin.conf
+
+        - name: Copy Pulsar Actions into the Persistent Volume
+          command: kubectl cp /tmp/pulsar_actions.yml {{ NAMESPACE }}/{{ job_pod_name.stdout }}:/galaxy/server/database/rules/pulsar_actions.yml
+          environment:
+            KUBECONFIG: /etc/kubernetes/admin.conf
+
+        - name: Copy TPV Rules into the Persistent Volume
+          command: kubectl cp /tmp/tpv_rules_local.yml {{ NAMESPACE }}/{{ job_pod_name.stdout }}:/galaxy/server/database/rules/tpv_rules_local.yml
+          environment:
+            KUBECONFIG: /etc/kubernetes/admin.conf
+
+        - name: Cleanup temporary local rule files
+          file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /tmp/pulsar_actions.yml
+            - /tmp/tpv_rules_local.yml
+

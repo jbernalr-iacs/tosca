@@ -581,6 +581,10 @@ class PulsarJobRunner(AsynchronousJobRunner):
     def _populate_parameter_defaults(self, job_destination):
         updated = False
         params = job_destination.params
+
+        if not hasattr(self, 'destination_defaults'):
+            self.destination_defaults = {}
+            
         for key, value in self.destination_defaults.items():
             if key in params:
                 if value is PARAMETER_SPECIFICATION_IGNORED:
