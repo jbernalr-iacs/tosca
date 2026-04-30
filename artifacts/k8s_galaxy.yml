@@ -226,6 +226,7 @@
                 - name: nginx-gateway
                   namespace: nginx-gateway
                   sectionName: http
+                  port: 80
                 rules:
                 - matches:
                   - path:
