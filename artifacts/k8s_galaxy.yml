@@ -4,7 +4,10 @@
   connection: local
   vars:
     NAMESPACE: galaxy
-    PULSAR_URL: "{{ pulsar_ngrok_url }}"
+
+    NGROK_SPAIN: "{{ pulsar_ngrok_spain_url }}"
+    NGROK_GERMANY: "{{ pulsar_ngrok_germany_url }}"
+    NGROK_ITALY: "{{ pulsar_ngrok_italy_url }}"
     
     PULSAR_PATCH_URL: "https://raw.githubusercontent.com/jbernalr-iacs/tosca/main/files/pulsar.py"
     
@@ -140,41 +143,82 @@
                     default: tpv_dispatcher
                     environments:
                       tpv_dispatcher:
-                        container_monitor: false
-                        docker_default_container_id: 'quay.io/galaxyproject/galaxy-min:24.2-uid'
+                        runner: dynamic
+                        type: python
                         function: map_tool_to_destination
                         rules_module: tpv.rules
-                        runner: dynamic
                         tpv_config_files:
-                          - https://gxy.io/tpv/db.yml
                           - /galaxy/server/database/rules/tpv_rules_local.yml
-                        type: python
                   handling:
                     assign:
                       - db-skip-locked
                   destinations:
-                    pulsar_eosc_node:
-                      runner: pulsar_rest
-                      params:
-                        app: _default_
-                        url: "{{ PULSAR_URL }}"
-                        private_token: eucanscreen2026
-                        # APUNTADO al mapa de acciones en el disco persistente
-                        file_action_config: /galaxy/server/database/rules/pulsar_actions.yml
-                        rewrite_parameters: true
-                        dependency_resolution: remote
-                        submit_native_python_path: true
-                  runners:
-                    k8s:
-                      k8s_cleanup_job: onsuccess
-                      k8s_data_volume_claim: 'galaxy-galaxy-pvc:/galaxy/server/database'
-                      load: galaxy.jobs.runners.kubernetes:KubernetesJobRunner
-                      k8s_use_service_account: true
                     local:
-                      load: galaxy.jobs.runners.local:LocalJobRunner
-                      workers: 4
-                    pulsar_rest:
-                      load: galaxy.jobs.runners.pulsar:PulsarJobRunner
+                      runner: local
+                    default:
+                      runner: local
+                    k8s:
+                      runner: k8s
+                      max_cores: 1
+                      params:
+                        docker_enabled: true
+                        require_container: true
+                      scheduling:
+                        accept:
+                          - docker
+                          - kubernetes
+                    pulsar_node1:
+                      runner: pulsar_rest
+                      scheduling:
+                        require:
+                          - target_node1
+                      params:
+                        url: "{{ NGROK_SPAIN }}"
+                        private_token: "TOKEN1234"
+                        dependency_resolution: remote
+                        file_action_config: "/galaxy/server/database/rules/pulsar_actions.yml"
+                        rewrite_parameters: "true"
+                        transport: "curl"
+                    pulsar_node2:
+                      runner: pulsar_rest
+                      scheduling:
+                        require:
+                          - target_node2
+                      params:
+                        url: "{{ NGROK_GERMANY }}"
+                        private_token: "TOKEN1234"
+                        dependency_resolution: remote
+                        file_action_config: "/galaxy/server/database/rules/pulsar_actions.yml"
+                        rewrite_parameters: "true"
+                        transport: "curl"
+                    pulsar_node3:
+                      runner: pulsar_rest
+                      scheduling:
+                        require:
+                          - target_node3
+                      params:
+                        url: "{{ NGROK_ITALY }}"
+                        private_token: "TOKEN1234"
+                        dependency_resolution: remote
+                        file_action_config: "/galaxy/server/database/rules/pulsar_actions.yml"
+                        rewrite_parameters: "true"
+                        transport: "curl"
+                    runners:
+                      k8s:
+                        load: galaxy.jobs.runners.kubernetes:KubernetesJobRunner
+                        k8s_use_service_account: true
+                        k8s_namespace: galaxy
+                        k8s_cleanup_job: onsuccess
+                        k8s_persistent_volume_claims: 'galaxy-galaxy-pvc:/galaxy/server/database'
+                        k8s_fs_group_id: 10001
+                        k8s_run_as_user_id: 10001
+                        k8s_run_as_group_id: 10001
+                      local:
+                        load: galaxy.jobs.runners.local:LocalJobRunner
+                        workers: 4
+                      pulsar_rest:
+                        load: galaxy.jobs.runners.pulsar:PulsarJobRunner
+                        workers: 3
 
               extraVolumeMounts:
                 - name: pulsar-patch-volume
@@ -231,13 +275,18 @@
                 - matches:
                   - path:
                       type: PathPrefix
-                      value: /
+                      value: /galaxy
                   backendRefs:
                   - name: galaxy-nginx
                     port: 8000
 
         - name: Apply HTTPRoute to open Nginx Gateway
           command: kubectl apply -f /opt/galaxy_http_route.yaml
+          environment:
+            KUBECONFIG: /etc/kubernetes/admin.conf
+
+        - name: Expose Nginx Gateway to physical host port (NodePort)
+          shell: kubectl patch svc nginx-gateway-nginx -n nginx-gateway -p '{"spec": {"type": "NodePort"}}'
           environment:
             KUBECONFIG: /etc/kubernetes/admin.conf
 
@@ -277,24 +326,56 @@
               global:
                 default_inherits: default
               destinations:
-                pulsar_eosc_node:
-                  runner: pulsar_rest
-                  params:
-                    file_action_config: /galaxy/server/database/rules/pulsar_actions.yml
-                    rewrite_parameters: 'true'
-                    dependency_resolution: remote
-                    # [MAGIA IAC] Aquí Ansible inyecta la variable automáticamente
-                    url: {{ PULSAR_URL }}
-                    private_token: eucanscreen2026
-                  scheduling:
-                    require: [pulsar_ngrok_tunnel]
+                local:
+                  runner: local
+                default:
+                  runner: local
                 k8s:
                   runner: k8s
                   max_cores: 1
                   params:
-                    docker_enabled: 'true'
+                    docker_enabled: true
+                    require_container: true
                   scheduling:
-                    accept: [docker]
+                    accept:
+                      - docker
+                      - kubernetes
+                pulsar_node1:
+                  runner: pulsar_rest
+                  scheduling:
+                    require:
+                      - target_node1
+                  params:
+                    url: "{{ NGROK_SPAIN }}"
+                    private_token: "TOKEN1234"
+                    dependency_resolution: remote
+                    file_action_config: "/galaxy/server/database/rules/pulsar_actions.yml"
+                    rewrite_parameters: "true"
+                    transport: "curl"
+                pulsar_node2:
+                  runner: pulsar_rest
+                  scheduling:
+                    require:
+                      - target_node2
+                  params:
+                    url: "{{ NGROK_GERMANY }}"
+                    private_token: "TOKEN1234"
+                    dependency_resolution: remote
+                    file_action_config: "/galaxy/server/database/rules/pulsar_actions.yml"
+                    rewrite_parameters: "true"
+                    transport: "curl"
+                pulsar_node3:
+                  runner: pulsar_rest
+                  scheduling:
+                    require:
+                      - target_node3
+                  params:
+                    url: "{{ NGROK_ITALY }}"
+                    private_token: "TOKEN1234"
+                    dependency_resolution: remote
+                    file_action_config: "/galaxy/server/database/rules/pulsar_actions.yml"
+                    rewrite_parameters: "true"
+                    transport: "curl"
               tools:
                 upload1:
                   execute: k8s
@@ -307,19 +388,30 @@
                     tmp_dir: 'true'
                   scheduling:
                     reject: [offline]
-                '.*ecs_fetch_aspire.*':
+                '.*bycovid_fetch_federated.*':
+                  rules:
+                    - id: dynamic_federated_router
+                      if: "True"
+                      execute: |
+                        try:
+                            params = job.get_param_values(app) if hasattr(job, 'get_param_values') else {}
+                            target = str(params.get('target_node', 'node1')).lower()
+                        except Exception:
+                            target = 'node1'
+                        if 'node2' in target or 'alemania' in target or 'germany' in target or 'finlandia' in target:
+                            entity.tpv_tags.require.append('target_node2')
+                        elif 'node3' in target or 'italia' in target:
+                            entity.tpv_tags.require.append('target_node3')
+                        else:
+                            entity.tpv_tags.require.append('target_node1')
+                '.*bycovid_merge_federated.*':
                   scheduling:
-                    require: [pulsar_ngrok_tunnel]
-                '.*ecs_enrich_v2.*':
+                    require:
+                      - kubernetes
+                '.*bycovid_dashboard_federated.*':
                   scheduling:
-                    require: [pulsar_ngrok_tunnel]
-                '.*ecs_qc.*':
-                  scheduling:
-                    require: [pulsar_ngrok_tunnel]
-                '.*ecs_merge.*':
-                  execute: k8s
-                '.*ecs_dashboard.*':
-                  execute: k8s
+                    require:
+                      - kubernetes
 
         - name: Get active galaxy-job-0 pod name
           shell: "kubectl get pods -n {{ NAMESPACE }} | grep '^galaxy-job-0' | grep 'Running' | awk '{print $1}' | head -n 1"
@@ -342,6 +434,14 @@
 
         - name: Copy TPV Rules into the Persistent Volume
           command: kubectl cp /tmp/tpv_rules_local.yml {{ NAMESPACE }}/{{ job_pod_name.stdout }}:/galaxy/server/database/rules/tpv_rules_local.yml
+          environment:
+            KUBECONFIG: /etc/kubernetes/admin.conf
+
+        - name: Restart Galaxy services to reload TPV configuration
+          command: >
+            kubectl rollout restart
+            deployment galaxy-web galaxy-job-0 galaxy-celery galaxy-workflow
+            -n {{ NAMESPACE }}
           environment:
             KUBECONFIG: /etc/kubernetes/admin.conf
 
