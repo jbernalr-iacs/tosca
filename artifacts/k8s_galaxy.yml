@@ -15,7 +15,7 @@
     brand: "{{ galaxy_brand | default('IM Deployed Galaxy K8s Cluster') }}"
     max_mem: "{{ galaxy_max_mem | default(0) }}"
     max_cores: "{{ galaxy_max_cores | default(0) }}"
-    galaxy_infra_url: "{{ galaxy_url | default('https://89.47.191.97.nip.io/galaxy') }}"
+    galaxy_infra_url: "{{ galaxy_url | default('https://' ~ ansible_default_ipv4.address ~ '.nip.io/galaxy') }}"
   tasks:
 
     - name: "Check if postgres-operator is already deployed"
@@ -255,6 +255,10 @@
           environment:
             KUBECONFIG: /etc/kubernetes/admin.conf
 
+        - name: Extract exact hostname from Galaxy URL
+          set_fact:
+            galaxy_hostname: "{{ galaxy_infra_url | urlsplit('hostname') }}"
+
         - name: Create HTTPRoute manifest file for Galaxy
           copy:
             dest: /opt/galaxy_http_route.yaml
@@ -269,9 +273,9 @@
                 parentRefs:
                 - name: nginx-gateway
                   namespace: nginx-gateway
-                  sectionName: https-89.47.191.97.nip.io
+                  sectionName: https-{{ galaxy_hostname }}
                 hostnames:
-                - 89.47.191.97.nip.io
+                - {{ galaxy_hostname }}
                 rules:
                 - matches:
                   - path:
