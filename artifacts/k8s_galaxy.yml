@@ -286,7 +286,8 @@
             KUBECONFIG: /etc/kubernetes/admin.conf
 
         - name: Expose Nginx Gateway to physical host port (NodePort)
-          shell: kubectl patch svc nginx-gateway-nginx -n nginx-gateway -p '{"spec": {"type": "NodePort"}}'
+          shell: >
+            kubectl patch svc nginx-gateway-nginx -n nginx-gateway -p '{"spec": {"type": "NodePort"}}'
           environment:
             KUBECONFIG: /etc/kubernetes/admin.conf
 
