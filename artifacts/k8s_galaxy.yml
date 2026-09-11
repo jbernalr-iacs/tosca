@@ -15,7 +15,7 @@
     brand: "{{ galaxy_brand | default('IM Deployed Galaxy K8s Cluster') }}"
     max_mem: "{{ galaxy_max_mem | default(0) }}"
     max_cores: "{{ galaxy_max_cores | default(0) }}"
-    galaxy_infra_url: "{{ galaxy_url | default('http://' ~ ansible_default_ipv4.address ~ '/galaxy') }}"
+    galaxy_infra_url: "{{ galaxy_url | default('https://89.47.191.97.nip.io/galaxy') }}"
   tasks:
 
     - name: "Check if postgres-operator is already deployed"
@@ -203,22 +203,22 @@
                         file_action_config: "/galaxy/server/database/rules/pulsar_actions.yml"
                         rewrite_parameters: "true"
                         transport: "curl"
-                    runners:
-                      k8s:
-                        load: galaxy.jobs.runners.kubernetes:KubernetesJobRunner
-                        k8s_use_service_account: true
-                        k8s_namespace: galaxy
-                        k8s_cleanup_job: onsuccess
-                        k8s_persistent_volume_claims: 'galaxy-galaxy-pvc:/galaxy/server/database'
-                        k8s_fs_group_id: 10001
-                        k8s_run_as_user_id: 10001
-                        k8s_run_as_group_id: 10001
-                      local:
-                        load: galaxy.jobs.runners.local:LocalJobRunner
-                        workers: 4
-                      pulsar_rest:
-                        load: galaxy.jobs.runners.pulsar:PulsarJobRunner
-                        workers: 3
+                  runners:
+                    k8s:
+                      load: galaxy.jobs.runners.kubernetes:KubernetesJobRunner
+                      k8s_use_service_account: true
+                      k8s_namespace: galaxy
+                      k8s_cleanup_job: onsuccess
+                      k8s_persistent_volume_claims: 'galaxy-galaxy-pvc:/galaxy/server/database'
+                      k8s_fs_group_id: 10001
+                      k8s_run_as_user_id: 10001
+                      k8s_run_as_group_id: 10001
+                    local:
+                      load: galaxy.jobs.runners.local:LocalJobRunner
+                      workers: 4
+                    pulsar_rest:
+                      load: galaxy.jobs.runners.pulsar:PulsarJobRunner
+                      workers: 3
 
               extraVolumeMounts:
                 - name: pulsar-patch-volume
@@ -269,8 +269,9 @@
                 parentRefs:
                 - name: nginx-gateway
                   namespace: nginx-gateway
-                  sectionName: http
-                  port: 80
+                  sectionName: https-89.47.191.97.nip.io
+                hostnames:
+                - 89.47.191.97.nip.io
                 rules:
                 - matches:
                   - path:
